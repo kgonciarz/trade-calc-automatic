@@ -1,4 +1,7 @@
 # app.py — Incoterm Auto Calculator (single "Price") + ICE London LIVE
+# Result = Price − TotalCosts + Diff
+# Freight is read from FREIGHT column (not ALL_IN) and shown in ONE unified costs table.
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -36,7 +39,7 @@ def _ice_ok() -> bool:
     return bool(ICE_XTICK_URL and ICE_USERNAME and ICE_PASSWORD)
 
 # =========================
-# YOUR FALLBACK DROPDOWNS (kept, but freight POL/POD will come from file when possible)
+# FALLBACK DROPDOWNS (kept)
 # =========================
 pol_options = [
     "POL", "ABIDJAN", "TIN CAN", "APAPA", "CALLAO", "CONAKRY", "DIEGO SUAREZ", "DOUALA",
@@ -121,7 +124,7 @@ def fetch_ice_last_close(symbol: str) -> float | None:
     return None if pd.isna(val) else float(val)
 
 # =========================
-# LOAD TABLES
+# LOAD COST + MATRIX
 # =========================
 @st.cache_data(show_spinner=False)
 def load_cost_tables():
@@ -152,7 +155,7 @@ def included_keys(mat_df: pd.DataFrame, incoterm: str) -> list[str]:
     return list(dict.fromkeys(keys))
 
 # =========================
-# FREIGHT
+# FREIGHT (USE FREIGHT COLUMN)
 # =========================
 @st.cache_data(show_spinner=False)
 def load_freight_table(path: str) -> pd.DataFrame:
@@ -163,11 +166,10 @@ def load_freight_table(path: str) -> pd.DataFrame:
 
     df.columns = [norm_col(c) for c in df.columns]
 
-    # map possible variants to canonical names
     if "SHIPPING LINE" not in df.columns and "SHIPPING LINE S" in df.columns:
         df = df.rename(columns={"SHIPPING LINE S": "SHIPPING LINE"})
 
-    needed = {"POL", "POD", "CONTAINER", "SHIPPING LINE", "ALL_IN", "CURRENCY"}
+    needed = {"POL", "POD", "CONTAINER", "SHIPPING LINE", "FREIGHT", "CURRENCY"}
     missing = needed - set(df.columns)
     if missing:
         raise ValueError(f"Freight file missing columns: {missing}")
@@ -177,9 +179,10 @@ def load_freight_table(path: str) -> pd.DataFrame:
     df["CONTAINER"] = df["CONTAINER"].astype(str).str.strip()
     df["SHIPPING LINE"] = df["SHIPPING LINE"].map(_norm)
     df["CURRENCY"] = df["CURRENCY"].astype(str).str.strip().str.upper()
-    df["ALL_IN"] = pd.to_numeric(df["ALL_IN"], errors="coerce")
 
-    df = df.dropna(subset=["POL", "POD", "CONTAINER", "SHIPPING LINE", "ALL_IN", "CURRENCY"]).copy()
+    df["FREIGHT"] = pd.to_numeric(df["FREIGHT"], errors="coerce")
+
+    df = df.dropna(subset=["POL", "POD", "CONTAINER", "SHIPPING LINE", "FREIGHT", "CURRENCY"]).copy()
     return df
 
 def freight_gbp_per_ton(df: pd.DataFrame, pol: str, pod: str, container: str, carrier_choice: str) -> tuple[float | None, str]:
@@ -192,7 +195,7 @@ def freight_gbp_per_ton(df: pd.DataFrame, pol: str, pod: str, container: str, ca
         return None, "No lane match"
 
     def row_to_gbp(r):
-        x = float(r["ALL_IN"])
+        x = float(r["FREIGHT"])
         ccy = r["CURRENCY"]
         if ccy == "EUR":
             return x * eur_gbp_rate
@@ -200,30 +203,30 @@ def freight_gbp_per_ton(df: pd.DataFrame, pol: str, pod: str, container: str, ca
             return x * usd_gbp_rate
         return x
 
-    sub["ALL_IN_GBP"] = sub.apply(row_to_gbp, axis=1)
+    sub["FREIGHT_GBP_CONTAINER"] = sub.apply(row_to_gbp, axis=1)
 
     if carrier_choice == "Auto (priciest)":
-        chosen = sub.loc[sub["ALL_IN_GBP"].idxmax()]
+        chosen = sub.loc[sub["FREIGHT_GBP_CONTAINER"].idxmax()]
         label = f"{chosen['SHIPPING LINE']} (auto priciest)"
-        per_container = float(chosen["ALL_IN_GBP"])
+        per_container_gbp = float(chosen["FREIGHT_GBP_CONTAINER"])
     elif carrier_choice == "Auto (cheapest)":
-        chosen = sub.loc[sub["ALL_IN_GBP"].idxmin()]
+        chosen = sub.loc[sub["FREIGHT_GBP_CONTAINER"].idxmin()]
         label = f"{chosen['SHIPPING LINE']} (auto cheapest)"
-        per_container = float(chosen["ALL_IN_GBP"])
+        per_container_gbp = float(chosen["FREIGHT_GBP_CONTAINER"])
     else:
         sc = _norm(carrier_choice)
         sub_sc = sub[sub["SHIPPING LINE"] == sc]
         if sub_sc.empty:
-            chosen = sub.loc[sub["ALL_IN_GBP"].idxmax()]
+            chosen = sub.loc[sub["FREIGHT_GBP_CONTAINER"].idxmax()]
             label = f"{chosen['SHIPPING LINE']} (fallback auto priciest)"
-            per_container = float(chosen["ALL_IN_GBP"])
+            per_container_gbp = float(chosen["FREIGHT_GBP_CONTAINER"])
         else:
-            chosen = sub_sc.loc[sub_sc["ALL_IN_GBP"].idxmax()]
+            chosen = sub_sc.loc[sub_sc["FREIGHT_GBP_CONTAINER"].idxmax()]
             label = f"{chosen['SHIPPING LINE']} (selected)"
-            per_container = float(chosen["ALL_IN_GBP"])
+            per_container_gbp = float(chosen["FREIGHT_GBP_CONTAINER"])
 
     tons_per_container = 20.0 if cont == "20" else 40.0
-    return round(per_container / tons_per_container, 2), label
+    return round(per_container_gbp / tons_per_container, 2), label
 
 # =========================
 # WAREHOUSE
@@ -246,53 +249,89 @@ def warehouse_series(wh_df: pd.DataFrame, wh_name: str, rent_months: int) -> pd.
     return s
 
 # =========================
-# COST ENGINE (Price-based)
+# UNIFIED TABLE ENGINE (one table, included/applied)
 # =========================
-def calc_cost_breakdown(
+def build_unified_cost_table(
+    *,
     inc_keys: list[str],
     price_gbp: float,
     cost_df: pd.DataFrame,
     computed: dict[str, float],
-):
+    manual_missing: dict[str, float],
+) -> tuple[pd.DataFrame, float]:
+    inc_set = set(inc_keys)
     cost_map = {r["KEY"]: r for _, r in cost_df.iterrows()}
-    computed_keys = {_norm(k) for k in computed.keys()}
+
+    # show: all matrix-included keys plus computed/manual keys (so freight shows even if not included)
+    keys_to_show = list(dict.fromkeys(
+        inc_keys
+        + [_norm(k) for k in computed.keys()]
+        + [_norm(k) for k in manual_missing.keys()]
+    ))
+
+    def find_orig(d: dict[str, float], key_norm: str) -> str | None:
+        for k in d.keys():
+            if _norm(k) == key_norm:
+                return k
+        return None
 
     rows = []
-    missing_manual = []
-
-    for k in inc_keys:
-        if k in computed_keys:
-            continue
+    for k in keys_to_show:
+        # Skip special flags from appearing as "cost lines"
         if k in (_norm("FINANCE"), _norm("BUYING DIFF GBP")):
             continue
 
-        r = cost_map.get(k)
-        if r is None:
-            missing_manual.append(k)
-            continue
+        display = k
+        value = 0.0
+        source = "—"
 
-        name = str(r.get("COST ITEM", k)).strip()
-        typ = str(r.get("TYPE", "")).strip().lower()
-        val = r.get("VALUE", np.nan)
-
-        if pd.isna(val):
-            missing_manual.append(name)
-            continue
-
-        val = float(val)
-        if typ == "percent":
-            amt = (val / 100.0) * price_gbp
-            rows.append({"Cost Item": name, "GBP/ton": round(amt, 2), "Source": f"{val:.4f}% of price"})
+        # Manual has priority
+        mkey = find_orig(manual_missing, k)
+        if mkey is not None:
+            display = mkey
+            value = float(manual_missing[mkey] or 0.0)
+            source = "Manual"
         else:
-            rows.append({"Cost Item": name, "GBP/ton": round(val, 2), "Source": "Fixed (cost_items.xlsx)"})
+            ckey = find_orig(computed, k)
+            if ckey is not None:
+                display = ckey
+                value = float(computed[ckey] or 0.0)
+                source = "Computed"
+            else:
+                r = cost_map.get(k)
+                if r is None:
+                    value = 0.0
+                    source = "Unknown item"
+                else:
+                    display = str(r.get("COST ITEM", k)).strip()
+                    typ = str(r.get("TYPE", "")).strip().lower()
+                    val = r.get("VALUE", np.nan)
+                    if pd.isna(val):
+                        value = 0.0
+                        source = "Missing in cost_items.xlsx"
+                    else:
+                        val = float(val)
+                        if typ == "percent":
+                            value = (val / 100.0) * price_gbp
+                            source = f"{val:.4f}% of price"
+                        else:
+                            value = val
+                            source = "Fixed (cost_items.xlsx)"
 
-    for name, v in computed.items():
-        if _norm(name) in inc_keys:
-            rows.append({"Cost Item": name, "GBP/ton": round(float(v or 0.0), 2), "Source": "Computed"})
+        included = "YES" if k in inc_set else "NO"
+        applied = value if included == "YES" else 0.0
+
+        rows.append({
+            "Cost Item": display,
+            "Value GBP/t": round(value, 2),
+            "Included?": included,
+            "Applied GBP/t": round(applied, 2),
+            "Source": source,
+        })
 
     df = pd.DataFrame(rows)
-    subtotal = float(df["GBP/ton"].sum()) if not df.empty else 0.0
-    return df, subtotal, missing_manual
+    total_applied = float(df["Applied GBP/t"].sum()) if not df.empty else 0.0
+    return df, total_applied
 
 # =========================
 # APP UI
@@ -302,13 +341,12 @@ st.title("🧮 Incoterm Auto Calculator — Result = Price − Costs + Diff (ICE
 
 left, right = st.columns([0.60, 0.40], gap="large")
 
-# --- DEV/DEBUG cache reset (important while editing Excel) ---
 with right:
     if st.button("♻️ Reload Excel (clear cache)"):
         st.cache_data.clear()
         st.rerun()
 
-# Try load freight file early (so POL/POD can come from it)
+# Load freight early so we can use its POL/POD lists (automatic match)
 freight_df_for_ui = None
 freight_file_error = None
 try:
@@ -349,31 +387,29 @@ with left:
 
     st.markdown("---")
     st.subheader("Route / Logistics")
-
     container_size = st.selectbox("Container", ["20", "40"], index=1)
 
-    # ✅ POL/POD from freight file (guaranteed match)
+    # POL/POD from freight file so it's always a match (fallback to manual lists if file missing)
     if freight_df_for_ui is not None:
         fdf_c = freight_df_for_ui[freight_df_for_ui["CONTAINER"] == str(container_size)].copy()
-
         pol_list = sorted(fdf_c["POL"].dropna().unique().tolist())
-        if not pol_list:
-            st.warning("Freight file loaded but has no POL values for this container. Falling back to manual lists.")
-            pol = st.selectbox("POL", sorted(pol_options))
-            pod = st.selectbox("POD", sorted(destination_options))
-        else:
+        if pol_list:
             pol = st.selectbox("POL (from freight file)", pol_list, index=0)
-
             pod_list = sorted(fdf_c.loc[fdf_c["POL"] == _norm(pol), "POD"].dropna().unique().tolist())
-            if not pod_list:
-                st.warning("No POD values for selected POL/container. Falling back to manual POD list.")
-                pod = st.selectbox("POD", sorted(destination_options))
-            else:
+            if pod_list:
                 pod = st.selectbox("POD (from freight file)", pod_list, index=0)
+            else:
+                st.warning("No POD for selected POL/container in freight file. Using manual POD list.")
+                pol = st.selectbox("POL (manual)", sorted(pol_options))
+                pod = st.selectbox("POD (manual)", sorted(destination_options))
+        else:
+            st.warning("Freight file has no POL for this container. Using manual lists.")
+            pol = st.selectbox("POL (manual)", sorted(pol_options))
+            pod = st.selectbox("POD (manual)", sorted(destination_options))
     else:
         st.caption(f"Freight file not usable for POL/POD dropdown: {freight_file_error}")
-        pol = st.selectbox("POL", sorted(pol_options))
-        pod = st.selectbox("POD", sorted(destination_options))
+        pol = st.selectbox("POL (manual)", sorted(pol_options))
+        pod = st.selectbox("POD (manual)", sorted(destination_options))
 
     st.markdown("---")
     st.subheader("Warehouse")
@@ -421,72 +457,53 @@ diff_applies = (_norm("BUYING DIFF GBP") in inc_keys)
 diff_used = diff if diff_applies else 0.0
 
 # =========================
-# Freight (computed)
+# COMPUTED COSTS (always computed so they show in unified table)
 # =========================
-computed = {}
+computed: dict[str, float] = {}
+
+# --- Freight computed from FREIGHT column ---
 freight_cost = 0.0
-freight_note = "Not included"
+freight_label = "Not calculated"
+try:
+    fdf = load_freight_table(FREIGHT_XLSX)
+    lane = fdf[
+        (fdf["POL"] == _norm(pol)) &
+        (fdf["POD"] == _norm(pod)) &
+        (fdf["CONTAINER"] == str(container_size))
+    ].copy()
 
-if _norm("FREIGHT") in inc_keys:
-    try:
-        fdf = load_freight_table(FREIGHT_XLSX)
+    carriers = sorted(lane["SHIPPING LINE"].unique().tolist()) if not lane.empty else []
+    carrier_choice = right.selectbox("Shipping line", ["Auto (priciest)", "Auto (cheapest)"] + carriers, index=0)
 
-        # ✅ define lane BEFORE any use (fix)
-        lane = fdf[
-            (fdf["POL"] == _norm(pol)) &
-            (fdf["POD"] == _norm(pod)) &
-            (fdf["CONTAINER"] == str(container_size))
-        ].copy()
-
-        right.caption(f"Freight lane rows found: {len(lane)}")
-
-        carriers = sorted(lane["SHIPPING LINE"].unique().tolist()) if not lane.empty else []
-        carrier_choice = right.selectbox("Shipping line", ["Auto (priciest)", "Auto (cheapest)"] + carriers, index=0)
-
-        # optional debug: show lane rows
-        with right.expander("🔎 Freight rows used (debug)", expanded=False):
-            if lane.empty:
-                right.info("No rows matched.")
-            else:
-                right.dataframe(lane[["SHIPPING LINE", "ALL_IN", "CURRENCY", "CONTAINER"]].sort_values("ALL_IN"), use_container_width=True)
-
-        val, label = freight_gbp_per_ton(fdf, pol, pod, container_size, carrier_choice)
-        if val is None:
-            right.warning("No freight match → manual input")
-            freight_cost = right.number_input("FREIGHT manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
-            freight_note = "Manual (no lane match)"
-        else:
-            freight_cost = float(val)
-            freight_note = f"Auto: {label}"
-            right.caption(f"Freight: {label} → £{freight_cost:,.2f}/t")
-    except Exception as e:
-        right.warning(f"Freight failed: {e} → manual")
+    val, label = freight_gbp_per_ton(fdf, pol, pod, container_size, carrier_choice)
+    if val is None:
+        right.warning("No freight lane match → manual input")
         freight_cost = right.number_input("FREIGHT manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
-        freight_note = "Manual (error)"
+        freight_label = "Manual (no lane match)"
+    else:
+        freight_cost = float(val)
+        freight_label = f"Auto ({label})"
+
+    with right.expander("🔎 Freight lane rows (debug)", expanded=False):
+        right.caption(f"Lane rows: {len(lane)}")
+        if not lane.empty:
+            right.dataframe(lane[["SHIPPING LINE", "FREIGHT", "CURRENCY", "CONTAINER"]].sort_values("FREIGHT"), use_container_width=True)
+
+except Exception as e:
+    right.warning(f"Freight failed: {e} → manual input")
+    freight_cost = right.number_input("FREIGHT manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+    freight_label = "Manual (error)"
 
 computed["FREIGHT"] = float(freight_cost)
-# Always show freight result (even if not included by incoterm)
-with right.expander("🚢 Freight (GBP/ton)", expanded=True):
-    right.write(f"Included by incoterm? **{'YES' if _norm('FREIGHT') in inc_keys else 'NO'}**")
-    right.write(f"Freight per ton: **£{freight_cost:,.2f}/t**")
-    if _norm("FREIGHT") in inc_keys:
-        right.caption(f"{freight_note}")
-    else:
-        right.caption("Not applied to total costs because matrix has FREIGHT=0 for this incoterm.")
 
-# =========================
-# Warehouse (inject line items)
-# =========================
-warehouse_total = 0.0
+# --- Warehouse computed: inject each line as a computed cost (so it can be included by matrix if rows exist) ---
 try:
     wh_df = load_warehouse_table(WAREHOUSE_XLSX)
     wh_name = left.selectbox("Warehouse name", sorted(wh_df.columns), index=0)
     ws = warehouse_series(wh_df, wh_name, rent_months)
-    warehouse_total = float(ws.sum())
     with right.expander("📦 Warehouse breakdown", expanded=False):
         right.dataframe(ws.round(2).to_frame("GBP/ton"), use_container_width=True)
-        right.write(f"Total: £{warehouse_total:,.2f}/t")
-
+        right.write(f"Total: £{float(ws.sum()):,.2f}/t")
     for k, v in ws.items():
         computed[k] = float(v)
 except Exception as e:
@@ -495,20 +512,27 @@ except Exception as e:
     computed["WAREHOUSE TOTAL"] = float(wh_manual)
 
 # =========================
-# Auto costs + manual missing
+# Manual inputs for missing INCLUDED items (blank/missing in cost_items)
 # =========================
-cost_breakdown_df, costs_subtotal, missing_manual = calc_cost_breakdown(
-    inc_keys=inc_keys,
-    price_gbp=price_gbp,
-    cost_df=cost_df,
-    computed=computed,
-)
+manual_missing_vals: dict[str, float] = {}
 
-manual_missing = {}
-if missing_manual:
+cost_map = {r["KEY"]: r for _, r in cost_df.iterrows()}
+computed_keys = {_norm(k) for k in computed.keys()}
+
+missing_manual_names: list[str] = []
+for k in inc_keys:
+    if k in computed_keys:
+        continue
+    if k in (_norm("FINANCE"), _norm("BUYING DIFF GBP")):
+        continue
+    r = cost_map.get(k)
+    if r is None or pd.isna(r.get("VALUE", np.nan)):
+        missing_manual_names.append(str(r.get("COST ITEM", k)).strip() if r is not None else k)
+
+if missing_manual_names:
     right.markdown("### Manual inputs (only what can't be automated)")
-    for item in missing_manual:
-        manual_missing[str(item)] = right.number_input(
+    for item in missing_manual_names:
+        manual_missing_vals[item] = right.number_input(
             f"{item} (GBP/ton)",
             min_value=0.0,
             value=0.0,
@@ -517,22 +541,28 @@ if missing_manual:
             key=f"man_{_norm(item)}",
         )
 
-if manual_missing:
-    add = pd.DataFrame([{"Cost Item": k, "GBP/ton": float(v), "Source": "Manual"} for k, v in manual_missing.items()])
-    cost_breakdown_df = pd.concat([cost_breakdown_df, add], ignore_index=True) if not cost_breakdown_df.empty else add
-    costs_subtotal = float(cost_breakdown_df["GBP/ton"].sum()) if not cost_breakdown_df.empty else 0.0
+# =========================
+# One unified table with Included/Applied
+# =========================
+cost_table, costs_subtotal_applied = build_unified_cost_table(
+    inc_keys=inc_keys,
+    price_gbp=price_gbp,
+    cost_df=cost_df,
+    computed=computed,
+    manual_missing=manual_missing_vals,
+)
 
 # =========================
-# Finance (optional)
+# Finance (optional) — applied only if FINANCE included by matrix
 # =========================
 finance_included = (_norm("FINANCE") in inc_keys)
-pre_finance_cost = costs_subtotal
+pre_finance_cost = costs_subtotal_applied
 if finance_included and payment_days > 0 and annual_rate > 0:
     finance_cost = (annual_rate / 365.0) * float(payment_days) * pre_finance_cost
 else:
     finance_cost = 0.0
 
-total_cost = costs_subtotal + finance_cost
+total_cost = costs_subtotal_applied + finance_cost
 
 # =========================
 # RESULT = Price - Costs + Diff
@@ -545,18 +575,20 @@ total_result = result_per_ton * float(volume)
 # =========================
 right.markdown("## Results")
 right.info(f"Price (GBP): **£{price_gbp:,.2f}/t**" + (f"  (ICE: {ice_symbol})" if ice_used else ""))
-right.info(f"Total costs: **£{total_cost:,.2f}/t**")
+right.info(f"Total costs (applied): **£{total_cost:,.2f}/t**")
 right.caption(f"Diff applies by matrix? {'YES' if diff_applies else 'NO'} → using £{diff_used:,.2f}/t")
+right.caption(f"Freight calculated: £{freight_cost:,.2f}/t — {freight_label}")
 
 right.success(f"Result per ton = Price − Costs + Diff: **£{result_per_ton:,.2f}/t**")
 right.success(f"Total result (× {int(volume)} t): **£{total_result:,.2f}**")
 
-with st.expander("📊 Cost breakdown (incoterm included)", expanded=True):
-    st.write(f"Incoterm: **{incoterm}**")
-    if cost_breakdown_df.empty:
-        st.info("No costs included (or matrix/cost names do not match).")
-    else:
-        st.dataframe(cost_breakdown_df.sort_values("GBP/ton", ascending=False), use_container_width=True)
+with st.expander("📊 All costs (one table)", expanded=True):
+    # show included first, biggest applied on top
+    st.dataframe(
+        cost_table.sort_values(["Included?", "Applied GBP/t"], ascending=[False, False]),
+        use_container_width=True
+    )
+    st.caption("‘Applied GBP/t’ is what is actually counted in Total Costs, based on the Incoterm matrix.")
 
 with st.expander("🔎 Included items (matrix keys)", expanded=False):
     st.write(inc_keys)
