@@ -465,6 +465,14 @@ if _norm("FREIGHT") in inc_keys:
         freight_note = "Manual (error)"
 
 computed["FREIGHT"] = float(freight_cost)
+# Always show freight result (even if not included by incoterm)
+with right.expander("🚢 Freight (GBP/ton)", expanded=True):
+    right.write(f"Included by incoterm? **{'YES' if _norm('FREIGHT') in inc_keys else 'NO'}**")
+    right.write(f"Freight per ton: **£{freight_cost:,.2f}/t**")
+    if _norm("FREIGHT") in inc_keys:
+        right.caption(f"{freight_note}")
+    else:
+        right.caption("Not applied to total costs because matrix has FREIGHT=0 for this incoterm.")
 
 # =========================
 # Warehouse (inject line items)
