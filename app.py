@@ -456,9 +456,6 @@ with left:
         disabled=use_ice,
     )
 
-    st.markdown("### Diff (adds to result)")
-    diff = st.number_input("Diff (GBP/ton)", value=0.0, step=1.0, format="%.2f")
-
     st.markdown("---")
     st.subheader("Route / Logistics")
     container_size = st.selectbox("Container", ["20", "40"], index=1)
@@ -505,7 +502,9 @@ with left:
         st.caption(f"Available shipping lines on this route: {len(final_options)}")
 
     st.markdown("---")
-    st.subheader("Warehouse")
+    st.subheader("Diff & Warehouse")
+    diff = st.number_input("Diff (GBP/ton, adds to result)", value=0.0, step=1.0, format="%.2f")
+    
     rent_months = st.number_input("Rent months (multiplies WAREHOUSE RENT)", min_value=0, value=1, step=1)
 
     st.markdown("---")
