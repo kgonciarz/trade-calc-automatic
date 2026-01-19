@@ -473,7 +473,14 @@ with left:
         pod = st.selectbox("POD (from freight file)", pod_list, index=0)
 
         lane = fdf_c[(fdf_c["POL"] == _norm(pol)) & (fdf_c["POD"] == _norm(pod))].copy()
-        shipping_lines = sorted(lane["SHIPPING LINE"].dropna().unique().tolist())
+
+        # Candidates from the real Shipping Line column
+        cands = sorted(lane["SHIPPING LINE"].dropna().unique().tolist())
+
+        # ✅ If any STS_* exist on this lane, only show STS_* options
+        sts_cands = [x for x in cands if x.startswith("STS_")]
+        shipping_lines = sts_cands if sts_cands else cands
+
         shipping_line = st.selectbox("Shipping line (from lane)", shipping_lines, index=0)
 
         st.caption(f"Lane rows found: {len(lane)}")
