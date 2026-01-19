@@ -200,6 +200,24 @@ def included_keys(mat_df: pd.DataFrame, incoterm: str) -> list[str]:
     keys = mat_df.loc[mat_df[ic] == 1, "KEY"].tolist()
     return list(dict.fromkeys(keys))
 
+MARINE_INS_XLSX = "marine_insurance.xlsx"
+
+@st.cache_data(show_spinner=False)
+def load_marine_insurance_table(path: str) -> pd.DataFrame:
+    df = pd.read_excel(path)
+    df.columns = [_norm_col(c) for c in df.columns]
+
+    needed = {"MARINE INSURANCE", "VALUE", "TYPE"}
+    missing = needed - set(df.columns)
+    if missing:
+        raise ValueError(f"Marine insurance file missing columns: {missing}")
+
+    df["MARINE INSURANCE"] = df["MARINE INSURANCE"].astype(str).str.strip()
+    df["TYPE"] = df["TYPE"].astype(str).str.strip().str.lower().replace({"percentage": "percent", "%": "percent"})
+    df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
+
+    df = df.dropna(subset=["MARINE INSURANCE", "VALUE"]).copy()
+    return df
 
 # =========================
 # FREIGHT - SIMPLIFIED AND FIXED
@@ -538,6 +556,7 @@ else:
 cost_df, mat_df = load_cost_tables()
 inc_keys = included_keys(mat_df, incoterm)
 
+
 # =========================
 # COMPUTED COSTS
 # =========================
@@ -581,6 +600,50 @@ except Exception as e:
     right.warning(f"Warehouse not loaded: {e}")
     wh_manual = right.number_input("Warehouse total manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
     computed["WAREHOUSE TOTAL"] = float(wh_manual)
+
+# =========================
+# MARINE INSURANCE (only if included by incoterm)
+# =========================
+marine_needed = (_norm("MARINE INSURANCE (1st)") in inc_keys) or (_norm("MARINE INSURANCE (2nd)") in inc_keys)
+
+if marine_needed:
+    try:
+        midf = load_marine_insurance_table(MARINE_INS_XLSX)
+
+        opts = midf["MARINE INSURANCE"].tolist()
+        # choose in right column so it feels like other “computed” selectors
+        chosen_mi = right.selectbox("Marine insurance option", opts, index=0)
+
+        row = midf.loc[midf["MARINE INSURANCE"] == chosen_mi].iloc[0]
+        mi_type = str(row["TYPE"]).lower()
+        mi_val = float(row["VALUE"])
+
+        if mi_type == "percent":
+            marine_cost = (mi_val / 100.0) * float(price_gbp)
+            mi_source = f"{mi_val:.4f}% of price"
+        else:
+            marine_cost = mi_val
+            mi_source = "Fixed"
+
+        # If your matrix has both (1st) and (2nd), you can decide:
+        # - apply the same selected option to whichever is included.
+        if _norm("MARINE INSURANCE (1st)") in inc_keys:
+            computed["MARINE INSURANCE (1st)"] = float(marine_cost)
+        if _norm("MARINE INSURANCE (2nd)") in inc_keys:
+            computed["MARINE INSURANCE (2nd)"] = float(marine_cost)
+
+        right.caption(f"Marine insurance: £{marine_cost:,.2f}/t ({mi_source})")
+
+    except Exception as e:
+        right.warning(f"Marine insurance table error: {e}. Using manual input.")
+        if _norm("MARINE INSURANCE (1st)") in inc_keys:
+            computed["MARINE INSURANCE (1st)"] = float(
+                right.number_input("MARINE INSURANCE (1st) manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+            )
+        if _norm("MARINE INSURANCE (2nd)") in inc_keys:
+            computed["MARINE INSURANCE (2nd)"] = float(
+                right.number_input("MARINE INSURANCE (2nd) manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+            )
 
 # =========================
 # Manual inputs for missing INCLUDED items
