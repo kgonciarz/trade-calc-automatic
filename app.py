@@ -331,11 +331,11 @@ def build_unified_cost_table(
     inc_set = set(inc_keys)
     cost_map = {r["KEY"]: r for _, r in cost_df.iterrows()}
 
-    # Filter out FINANCE and BUYING DIFF GBP from keys to show
+    # Filter out FINANCE and BUYING DIFF GBP from keys to show (diff is handled separately in result calculation)
     keys_to_show = list(dict.fromkeys(
-        [k for k in inc_keys if k not in (_norm("FINANCE"), _norm("BUYING DIFF GBP"))]
+        [k for k in inc_keys if k not in (_norm("FINANCE"), _norm("BUYING DIFF GBP"), _norm("BASED DIFF"))]
         + [_norm(k) for k in computed.keys()]
-        + [_norm(k) for k in manual_missing.keys()]
+        + [_norm(k) for k in manual_missing.keys() if _norm(k) not in (_norm("BUYING DIFF GBP"), _norm("BASED DIFF"))]
     ))
 
     def find_orig(d: dict[str, float], key_norm: str) -> str | None:
@@ -503,9 +503,7 @@ with left:
         st.caption(f"Available shipping lines on this route: {len(final_options)}")
 
     st.markdown("---")
-    st.subheader("Diff & Warehouse")
-    diff = st.number_input("Diff (GBP/ton, adds to result)", value=0.0, step=1.0, format="%.2f")
-    
+    st.subheader("Warehouse")
     rent_months = st.number_input("Rent months (multiplies WAREHOUSE RENT)", min_value=0, value=1, step=1)
 
     st.markdown("---")
@@ -595,18 +593,64 @@ cost_map = {r["KEY"]: r for _, r in cost_df.iterrows()}
 computed_keys = {_norm(k) for k in computed.keys()}
 
 missing_manual_names: list[str] = []
+diff = 0.0  # Initialize diff variable
+diff_item_name = None  # Track the diff item name
 for k in inc_keys:
     if k in computed_keys:
         continue
-    # Skip FINANCE and BUYING DIFF GBP - these are handled separately
-    if k in (_norm("FINANCE"), _norm("BUYING DIFF GBP"), _norm("DIFF")):
+    # Skip FINANCE - it's calculated separately
+    if k in (_norm("FINANCE"),):
+        continue
+    # Handle BUYING DIFF GBP / BASED DIFF specially - show as manual input but DON'T add to costs
+    if k in (_norm("BUYING DIFF GBP"), _norm("BASED DIFF")):
+        r = cost_map.get(k)
+        diff_item_name = str(r.get("COST ITEM", k)).strip() if r is not None else k
         continue
     r = cost_map.get(k)
     if r is None or pd.isna(r.get("VALUE", np.nan)):
         missing_manual_names.append(str(r.get("COST ITEM", k)).strip() if r is not None else k)
 
-if missing_manual_names:
-    right.markdown("### Manual inputs (only what can't be automated)")
+# =========================
+# Manual inputs for missing INCLUDED items + DIFF
+# =========================
+manual_missing_vals: dict[str, float] = {}
+cost_map = {r["KEY"]: r for _, r in cost_df.iterrows()}
+computed_keys = {_norm(k) for k in computed.keys()}
+
+missing_manual_names: list[str] = []
+diff = 0.0  # Initialize diff variable
+diff_item_name = None  # Track the diff item name
+for k in inc_keys:
+    if k in computed_keys:
+        continue
+    # Skip FINANCE - it's calculated separately
+    if k in (_norm("FINANCE"),):
+        continue
+    # Handle BUYING DIFF GBP / BASED DIFF specially - show as manual input but DON'T add to costs
+    if k in (_norm("BUYING DIFF GBP"), _norm("BASED DIFF")):
+        r = cost_map.get(k)
+        diff_item_name = str(r.get("COST ITEM", k)).strip() if r is not None else k
+        continue
+    r = cost_map.get(k)
+    if r is None or pd.isna(r.get("VALUE", np.nan)):
+        missing_manual_names.append(str(r.get("COST ITEM", k)).strip() if r is not None else k)
+
+if missing_manual_names or diff_item_name:
+    right.markdown("### Manual inputs")
+    
+    # Show diff input first if applicable
+    if diff_item_name:
+        diff = right.number_input(
+            f"{diff_item_name} (GBP/ton) - ADDS TO MARGIN",
+            min_value=-1000.0,
+            value=0.0,
+            step=1.0,
+            format="%.2f",
+            key="diff_input",
+            help="This value is ADDED to the result (not subtracted as a cost)"
+        )
+    
+    # Then show other manual inputs
     for item in missing_manual_names:
         manual_missing_vals[item] = right.number_input(
             f"{item} (GBP/ton)",
@@ -648,8 +692,9 @@ total_result = result_per_ton * float(volume)
 right.markdown("## Results")
 right.info(f"**Price:** £{price_gbp:,.2f}/t" + (f" (ICE: {ice_symbol})" if ice_used else ""))
 right.info(f"**Total costs (applied):** £{total_cost:,.2f}/t")
-right.caption(f"Diff applies? {'YES' if diff_applies else 'NO'} → £{diff_used:,.2f}/t")
-right.success(f"**Result per ton:** £{result_per_ton:,.2f}/t")
+if diff != 0.0:
+    right.success(f"**Diff (added to margin):** £{diff:,.2f}/t")
+right.success(f"**Result per ton = Price − Costs + Diff:** £{result_per_ton:,.2f}/t")
 right.success(f"**Total result (× {int(volume)} t):** £{total_result:,.2f}")
 
 with st.expander("📊 All costs (one table)", expanded=True):
