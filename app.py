@@ -202,46 +202,44 @@ def included_keys(mat_df: pd.DataFrame, incoterm: str) -> list[str]:
 
 
 # =========================
-# FREIGHT (FREIGHT + LINER + SURCHARGE, user selects shipping line)
+# FREIGHT - SIMPLIFIED AND FIXED
 # =========================
 @st.cache_data(show_spinner=False)
 def load_freight_table(path: str) -> pd.DataFrame:
     df = pd.read_excel(path)
     df.columns = [_norm_col(c) for c in df.columns]
 
-    # IMPORTANT: Use the real "SHIPPING LINE" for logic. "SHIPPING LINE S" is display only.
+    # Check for required columns
     needed = {"POL", "POD", "CONTAINER", "SHIPPING LINE", "FREIGHT", "CURRENCY"}
     missing = needed - set(df.columns)
     if missing:
         raise ValueError(f"Freight file missing columns: {missing}")
 
+    # Add optional columns if missing
     if "LINER" not in df.columns:
         df["LINER"] = 0
     if "SURCHARGE" not in df.columns:
         df["SURCHARGE"] = 0
 
-    df["POL"] = df["POL"].map(_norm)
-    df["POD"] = df["POD"].map(_norm)
-    df["CONTAINER"] = df["CONTAINER"].apply(_norm_container)
-    
-    # Keep original shipping line for display, create normalized version for matching
-    df["SHIPPING LINE"] = df["SHIPPING LINE"].astype(str).str.strip()
-    df["SHIPPING_LINE_NORM"] = df["SHIPPING LINE"].map(_norm)  # normalized for logic
-
-    # keep Shipping Line S for display/debug only
-    if "SHIPPING LINE S" in df.columns:
-        df["SHIPPING LINE S"] = df["SHIPPING LINE S"].astype(str).str.strip()
-    else:
-        df["SHIPPING LINE S"] = ""
-
+    # Clean up the data - KEEP IT SIMPLE
+    df["POL_CLEAN"] = df["POL"].astype(str).str.strip().str.upper()
+    df["POD_CLEAN"] = df["POD"].astype(str).str.strip().str.upper()
+    df["CONTAINER_CLEAN"] = df["CONTAINER"].apply(_norm_container)
+    df["SHIPPING_LINE_CLEAN"] = df["SHIPPING LINE"].astype(str).str.strip().str.upper()
     df["CURRENCY"] = df["CURRENCY"].astype(str).str.strip().str.upper()
 
+    # Convert monetary values
     df["FREIGHT"] = df["FREIGHT"].apply(_money_to_float)
     df["LINER"] = df["LINER"].apply(_money_to_float)
     df["SURCHARGE"] = df["SURCHARGE"].apply(_money_to_float)
 
-    df = df.dropna(subset=["POL", "POD", "CONTAINER", "SHIPPING LINE", "CURRENCY"]).copy()
-    df = df[df["CONTAINER"].isin(["20", "40"])].copy()
+    # Filter out bad rows
+    df = df[
+        (df["POL_CLEAN"] != "") & 
+        (df["POD_CLEAN"] != "") & 
+        (df["CONTAINER_CLEAN"].isin(["20", "40"])) &
+        (df["SHIPPING_LINE_CLEAN"] != "")
+    ].copy()
 
     return df
 
@@ -252,23 +250,27 @@ def freight_gbp_per_ton(
     container: str,
     shipping_line: str,
 ) -> tuple[float | None, dict]:
-    pol_n = _norm(pol)
-    pod_n = _norm(pod)
-    cont = _norm_container(container)
-    sl = _norm(shipping_line)
+    
+    # Normalize inputs
+    pol_clean = str(pol).strip().upper()
+    pod_clean = str(pod).strip().upper()
+    cont_clean = _norm_container(container)
+    sl_clean = str(shipping_line).strip().upper()
 
+    # Filter for matching lane
     lane = df[
-        (df["POL"] == pol_n) &
-        (df["POD"] == pod_n) &
-        (df["CONTAINER"] == cont) &
-        (df["SHIPPING LINE"] == sl)
+        (df["POL_CLEAN"] == pol_clean) &
+        (df["POD_CLEAN"] == pod_clean) &
+        (df["CONTAINER_CLEAN"] == cont_clean) &
+        (df["SHIPPING_LINE_CLEAN"] == sl_clean)
     ].copy()
 
     if lane.empty:
         return None, {}
 
+    # Calculate total per container
     lane["TOTAL_CONTAINER"] = lane["FREIGHT"] + lane["LINER"] + lane["SURCHARGE"]
-    chosen = lane.loc[lane["TOTAL_CONTAINER"].idxmax()]  # if duplicates, take max
+    chosen = lane.iloc[0]  # Take first match
 
     ccy = str(chosen["CURRENCY"]).upper()
     conv = eur_gbp_rate if ccy == "EUR" else usd_gbp_rate if ccy == "USD" else 1.0
@@ -276,7 +278,7 @@ def freight_gbp_per_ton(
     total_container = float(chosen["TOTAL_CONTAINER"])
     total_gbp_container = total_container * conv
 
-    tons = 20.0 if cont == "20" else 40.0
+    tons = 20.0 if cont_clean == "20" else 40.0
     gbp_ton = round(total_gbp_container / tons, 2)
 
     details = {
@@ -288,8 +290,8 @@ def freight_gbp_per_ton(
         "total_container": total_container,
         "total_gbp_container": total_gbp_container,
         "tons_per_container": tons,
-        "container": cont,
-        "shipping_line": sl,
+        "container": cont_clean,
+        "shipping_line": sl_clean,
     }
     return gbp_ton, details
 
@@ -421,8 +423,10 @@ freight_df_for_ui = None
 freight_file_error = None
 try:
     freight_df_for_ui = load_freight_table(FREIGHT_XLSX)
+    right.success(f"✅ Freight file loaded: {len(freight_df_for_ui)} rows")
 except Exception as e:
     freight_file_error = str(e)
+    right.error(f"❌ Freight file error: {freight_file_error}")
 
 with left:
     st.subheader("Inputs")
@@ -459,32 +463,46 @@ with left:
     st.subheader("Route / Logistics")
     container_size = st.selectbox("Container", ["20", "40"], index=1)
 
-    if freight_df_for_ui is None:
-        st.caption(f"Freight file not usable: {freight_file_error}")
-        pol = st.selectbox("POL (manual)", sorted(set(pol_options)))
-        pod = st.selectbox("POD (manual)", sorted(set(destination_options)))
+    if freight_df_for_ui is None or freight_df_for_ui.empty:
+        st.warning("⚠️ Freight file not loaded - using manual inputs")
+        pol = st.text_input("POL (manual)", value="")
+        pod = st.text_input("POD (manual)", value="")
         shipping_line = st.text_input("Shipping line (manual)", value="")
     else:
-        fdf_c = freight_df_for_ui[freight_df_for_ui["CONTAINER"] == _norm_container(container_size)].copy()
+        # Filter by selected container size
+        fdf_c = freight_df_for_ui[
+            freight_df_for_ui["CONTAINER_CLEAN"] == _norm_container(container_size)
+        ].copy()
 
-        pol_list = sorted(fdf_c["POL"].dropna().unique().tolist())
-        pol = st.selectbox("POL (from freight file)", pol_list, index=0)
+        # Get unique POLs
+        pol_options = sorted(fdf_c["POL_CLEAN"].unique().tolist())
+        pol = st.selectbox("POL", pol_options, index=0 if pol_options else 0)
 
-        pod_list = sorted(fdf_c.loc[fdf_c["POL"] == _norm(pol), "POD"].dropna().unique().tolist())
-        pod = st.selectbox("POD (from freight file)", pod_list, index=0)
+        # Get PODs for selected POL
+        pod_options = sorted(
+            fdf_c[fdf_c["POL_CLEAN"] == pol]["POD_CLEAN"].unique().tolist()
+        )
+        pod = st.selectbox("POD", pod_options, index=0 if pod_options else 0)
 
-        lane = fdf_c[(fdf_c["POL"] == _norm(pol)) & (fdf_c["POD"] == _norm(pod))].copy()
+        # Get shipping lines for selected POL+POD+Container
+        lane_filtered = fdf_c[
+            (fdf_c["POL_CLEAN"] == pol) & 
+            (fdf_c["POD_CLEAN"] == pod)
+        ].copy()
 
-        # Candidates from the real Shipping Line column
-        cands = sorted(lane["SHIPPING LINE"].dropna().unique().tolist())
+        shipping_line_options = sorted(lane_filtered["SHIPPING_LINE_CLEAN"].unique().tolist())
+        
+        # Check if any STS_ options exist
+        sts_options = [x for x in shipping_line_options if x.startswith("STS_")]
+        final_options = sts_options if sts_options else shipping_line_options
 
-        # ✅ If any STS_* exist on this lane, only show STS_* options
-        sts_cands = [x for x in cands if x.startswith("STS_")]
-        shipping_lines = sts_cands if sts_cands else cands
+        if final_options:
+            shipping_line = st.selectbox("Shipping line", final_options, index=0)
+        else:
+            st.warning("No shipping lines found for this route")
+            shipping_line = st.text_input("Shipping line (manual)", value="")
 
-        shipping_line = st.selectbox("Shipping line (from lane)", shipping_lines, index=0)
-
-        st.caption(f"Lane rows found: {len(lane)}")
+        st.caption(f"Available shipping lines on this route: {len(final_options)}")
 
     st.markdown("---")
     st.subheader("Warehouse")
@@ -537,21 +555,22 @@ try:
     fdf = load_freight_table(FREIGHT_XLSX)
     val, details = freight_gbp_per_ton(fdf, pol, pod, container_size, shipping_line)
     if val is None:
-        right.warning("No freight row for that shipping line → manual input")
+        right.warning("⚠️ No freight row for that combination → using manual input")
         freight_cost = right.number_input("FREIGHT manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
     else:
         freight_cost = float(val)
         freight_details = details
+        right.success(f"✅ Freight calculated: £{freight_cost:,.2f}/ton")
 except Exception as e:
-    right.warning(f"Freight failed: {e} → manual input")
+    right.error(f"Freight calculation failed: {e}")
     freight_cost = right.number_input("FREIGHT manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
 
 computed["FREIGHT"] = float(freight_cost)
 
-with right.expander("🚢 Freight details (debug)", expanded=False):
-    right.write(f"Freight GBP/t: {freight_cost:,.2f}")
+with right.expander("🚢 Freight details", expanded=False):
+    right.write(f"**Freight GBP/t:** £{freight_cost:,.2f}")
     if freight_details:
-        right.write(freight_details)
+        right.json(freight_details)
 
 # --- Warehouse line items ---
 try:
@@ -560,7 +579,7 @@ try:
     ws = warehouse_series(wh_df, wh_name, rent_months)
     with right.expander("📦 Warehouse breakdown", expanded=False):
         right.dataframe(ws.round(2).to_frame("GBP/ton"), use_container_width=True)
-        right.write(f"Total: £{float(ws.sum()):,.2f}/t")
+        right.write(f"**Total:** £{float(ws.sum()):,.2f}/t")
     for k, v in ws.items():
         computed[k] = float(v)
 except Exception as e:
@@ -626,18 +645,18 @@ total_result = result_per_ton * float(volume)
 # OUTPUT
 # =========================
 right.markdown("## Results")
-right.info(f"Price (GBP): **£{price_gbp:,.2f}/t**" + (f"  (ICE: {ice_symbol})" if ice_used else ""))
-right.info(f"Total costs (applied): **£{total_cost:,.2f}/t**")
-right.caption(f"Diff applies by matrix? {'YES' if diff_applies else 'NO'} → using £{diff_used:,.2f}/t")
-right.success(f"Result per ton = Price − Costs + Diff: **£{result_per_ton:,.2f}/t**")
-right.success(f"Total result (× {int(volume)} t): **£{total_result:,.2f}**")
+right.info(f"**Price:** £{price_gbp:,.2f}/t" + (f" (ICE: {ice_symbol})" if ice_used else ""))
+right.info(f"**Total costs (applied):** £{total_cost:,.2f}/t")
+right.caption(f"Diff applies? {'YES' if diff_applies else 'NO'} → £{diff_used:,.2f}/t")
+right.success(f"**Result per ton:** £{result_per_ton:,.2f}/t")
+right.success(f"**Total result (× {int(volume)} t):** £{total_result:,.2f}")
 
 with st.expander("📊 All costs (one table)", expanded=True):
     st.dataframe(
         cost_table.sort_values(["Included?", "Applied GBP/t"], ascending=[False, False]),
         use_container_width=True
     )
-    st.caption("‘Applied GBP/t’ is what is actually counted in Total Costs, based on the Incoterm matrix.")
+    st.caption("'Applied GBP/t' is what is counted in Total Costs based on the Incoterm matrix.")
 
 with st.expander("🔎 Included items (matrix keys)", expanded=False):
     st.write(inc_keys)
