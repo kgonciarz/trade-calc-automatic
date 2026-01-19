@@ -331,8 +331,9 @@ def build_unified_cost_table(
     inc_set = set(inc_keys)
     cost_map = {r["KEY"]: r for _, r in cost_df.iterrows()}
 
+    # Filter out FINANCE and BUYING DIFF GBP from keys to show
     keys_to_show = list(dict.fromkeys(
-        inc_keys
+        [k for k in inc_keys if k not in (_norm("FINANCE"), _norm("BUYING DIFF GBP"))]
         + [_norm(k) for k in computed.keys()]
         + [_norm(k) for k in manual_missing.keys()]
     ))
