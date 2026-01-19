@@ -597,7 +597,8 @@ missing_manual_names: list[str] = []
 for k in inc_keys:
     if k in computed_keys:
         continue
-    if k in (_norm("FINANCE"), _norm("BUYING DIFF GBP")):
+    # Skip FINANCE and BUYING DIFF GBP - these are handled separately
+    if k in (_norm("FINANCE"), _norm("BUYING DIFF GBP"), _norm("DIFF")):
         continue
     r = cost_map.get(k)
     if r is None or pd.isna(r.get("VALUE", np.nan)):
