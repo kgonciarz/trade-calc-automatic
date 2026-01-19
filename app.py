@@ -538,9 +538,6 @@ else:
 cost_df, mat_df = load_cost_tables()
 inc_keys = included_keys(mat_df, incoterm)
 
-diff_applies = (_norm("BUYING DIFF GBP") in inc_keys)
-diff_used = diff if diff_applies else 0.0
-
 # =========================
 # COMPUTED COSTS
 # =========================
@@ -681,6 +678,10 @@ else:
     finance_cost = 0.0
 
 total_cost = costs_subtotal_applied + finance_cost
+
+# Check if diff applies based on incoterm matrix
+diff_applies = (_norm("BUYING DIFF GBP") in inc_keys or _norm("BASED DIFF") in inc_keys)
+diff_used = diff if diff_applies else 0.0
 
 # Result
 result_per_ton = price_gbp - total_cost + diff_used
