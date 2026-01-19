@@ -200,7 +200,7 @@ def included_keys(mat_df: pd.DataFrame, incoterm: str) -> list[str]:
     keys = mat_df.loc[mat_df[ic] == 1, "KEY"].tolist()
     return list(dict.fromkeys(keys))
 
-MARINE_INS_XLSX = "marine_insurance.xlsx"
+MARINE_INS_XLSX = "Marine_insurance.xlsx"
 
 @st.cache_data(show_spinner=False)
 def load_marine_insurance_table(path: str) -> pd.DataFrame:
