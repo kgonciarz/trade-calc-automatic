@@ -36,7 +36,7 @@ def _ice_ok() -> bool:
     return bool(ICE_XTICK_URL and ICE_USERNAME and ICE_PASSWORD)
 
 # =========================
-# YOUR DROPDOWNS (same style as your original)
+# YOUR FALLBACK DROPDOWNS (kept, but freight POL/POD will come from file when possible)
 # =========================
 pol_options = [
     "POL", "ABIDJAN", "TIN CAN", "APAPA", "CALLAO", "CONAKRY", "DIEGO SUAREZ", "DOUALA",
@@ -135,7 +135,9 @@ def load_cost_tables():
     mat_df["KEY"]  = mat_df["COST ITEM"].map(_norm)
 
     cost_df["VALUE"] = pd.to_numeric(cost_df.get("VALUE"), errors="coerce")
-    cost_df["TYPE"] = cost_df.get("TYPE", "").astype(str).str.strip().str.lower().replace({"percentage": "percent", "%": "percent"})
+    cost_df["TYPE"] = cost_df.get("TYPE", "").astype(str).str.strip().str.lower().replace(
+        {"percentage": "percent", "%": "percent"}
+    )
 
     for ic in INCOTERMS:
         if ic not in mat_df.columns:
@@ -156,38 +158,29 @@ def included_keys(mat_df: pd.DataFrame, incoterm: str) -> list[str]:
 def load_freight_table(path: str) -> pd.DataFrame:
     df = pd.read_excel(path)
 
-    # normalize column names aggressively (strip + collapse spaces + upper)
     def norm_col(c):
         return re.sub(r"\s+", " ", str(c or "")).strip().upper()
 
     df.columns = [norm_col(c) for c in df.columns]
 
     # map possible variants to canonical names
-    rename = {}
-    if "SHIPPING LINE" not in df.columns:
-        # sometimes it's "SHIPPING LINE S" or similar; prefer the main one if exists
-        if "SHIPPING LINE S" in df.columns:
-            rename["SHIPPING LINE S"] = "SHIPPING LINE"
-    df = df.rename(columns=rename)
+    if "SHIPPING LINE" not in df.columns and "SHIPPING LINE S" in df.columns:
+        df = df.rename(columns={"SHIPPING LINE S": "SHIPPING LINE"})
 
     needed = {"POL", "POD", "CONTAINER", "SHIPPING LINE", "ALL_IN", "CURRENCY"}
     missing = needed - set(df.columns)
     if missing:
         raise ValueError(f"Freight file missing columns: {missing}")
 
-    # normalize values
-    df["POL"] = df["POL"].map(_norm)          # -> upper trimmed
+    df["POL"] = df["POL"].map(_norm)
     df["POD"] = df["POD"].map(_norm)
     df["CONTAINER"] = df["CONTAINER"].astype(str).str.strip()
     df["SHIPPING LINE"] = df["SHIPPING LINE"].map(_norm)
     df["CURRENCY"] = df["CURRENCY"].astype(str).str.strip().str.upper()
-
-    # numeric all_in (your ALL_IN looks numeric already)
     df["ALL_IN"] = pd.to_numeric(df["ALL_IN"], errors="coerce")
 
     df = df.dropna(subset=["POL", "POD", "CONTAINER", "SHIPPING LINE", "ALL_IN", "CURRENCY"]).copy()
     return df
-
 
 def freight_gbp_per_ton(df: pd.DataFrame, pol: str, pod: str, container: str, carrier_choice: str) -> tuple[float | None, str]:
     pol_n = _norm(pol)
@@ -288,7 +281,6 @@ def calc_cost_breakdown(
 
         val = float(val)
         if typ == "percent":
-            # percent is applied to PRICE now (your requested model)
             amt = (val / 100.0) * price_gbp
             rows.append({"Cost Item": name, "GBP/ton": round(amt, 2), "Source": f"{val:.4f}% of price"})
         else:
@@ -309,6 +301,20 @@ st.set_page_config(layout="wide")
 st.title("🧮 Incoterm Auto Calculator — Result = Price − Costs + Diff (ICE live)")
 
 left, right = st.columns([0.60, 0.40], gap="large")
+
+# --- DEV/DEBUG cache reset (important while editing Excel) ---
+with right:
+    if st.button("♻️ Reload Excel (clear cache)"):
+        st.cache_data.clear()
+        st.rerun()
+
+# Try load freight file early (so POL/POD can come from it)
+freight_df_for_ui = None
+freight_file_error = None
+try:
+    freight_df_for_ui = load_freight_table(FREIGHT_XLSX)
+except Exception as e:
+    freight_file_error = str(e)
 
 with left:
     st.subheader("Inputs")
@@ -343,9 +349,31 @@ with left:
 
     st.markdown("---")
     st.subheader("Route / Logistics")
-    pol = st.selectbox("POL", sorted(pol_options))
-    pod = st.selectbox("POD", sorted(destination_options))
+
     container_size = st.selectbox("Container", ["20", "40"], index=1)
+
+    # ✅ POL/POD from freight file (guaranteed match)
+    if freight_df_for_ui is not None:
+        fdf_c = freight_df_for_ui[freight_df_for_ui["CONTAINER"] == str(container_size)].copy()
+
+        pol_list = sorted(fdf_c["POL"].dropna().unique().tolist())
+        if not pol_list:
+            st.warning("Freight file loaded but has no POL values for this container. Falling back to manual lists.")
+            pol = st.selectbox("POL", sorted(pol_options))
+            pod = st.selectbox("POD", sorted(destination_options))
+        else:
+            pol = st.selectbox("POL (from freight file)", pol_list, index=0)
+
+            pod_list = sorted(fdf_c.loc[fdf_c["POL"] == _norm(pol), "POD"].dropna().unique().tolist())
+            if not pod_list:
+                st.warning("No POD values for selected POL/container. Falling back to manual POD list.")
+                pod = st.selectbox("POD", sorted(destination_options))
+            else:
+                pod = st.selectbox("POD (from freight file)", pod_list, index=0)
+    else:
+        st.caption(f"Freight file not usable for POL/POD dropdown: {freight_file_error}")
+        pol = st.selectbox("POL", sorted(pol_options))
+        pod = st.selectbox("POD", sorted(destination_options))
 
     st.markdown("---")
     st.subheader("Warehouse")
@@ -397,24 +425,44 @@ diff_used = diff if diff_applies else 0.0
 # =========================
 computed = {}
 freight_cost = 0.0
+freight_note = "Not included"
 
 if _norm("FREIGHT") in inc_keys:
     try:
         fdf = load_freight_table(FREIGHT_XLSX)
-        lane = fdf[(fdf["POL"] == _norm(pol)) & (fdf["POD"] == _norm(pod)) & (fdf["CONTAINER"] == str(container_size))]
+
+        # ✅ define lane BEFORE any use (fix)
+        lane = fdf[
+            (fdf["POL"] == _norm(pol)) &
+            (fdf["POD"] == _norm(pod)) &
+            (fdf["CONTAINER"] == str(container_size))
+        ].copy()
+
+        right.caption(f"Freight lane rows found: {len(lane)}")
+
         carriers = sorted(lane["SHIPPING LINE"].unique().tolist()) if not lane.empty else []
         carrier_choice = right.selectbox("Shipping line", ["Auto (priciest)", "Auto (cheapest)"] + carriers, index=0)
+
+        # optional debug: show lane rows
+        with right.expander("🔎 Freight rows used (debug)", expanded=False):
+            if lane.empty:
+                right.info("No rows matched.")
+            else:
+                right.dataframe(lane[["SHIPPING LINE", "ALL_IN", "CURRENCY", "CONTAINER"]].sort_values("ALL_IN"), use_container_width=True)
 
         val, label = freight_gbp_per_ton(fdf, pol, pod, container_size, carrier_choice)
         if val is None:
             right.warning("No freight match → manual input")
             freight_cost = right.number_input("FREIGHT manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+            freight_note = "Manual (no lane match)"
         else:
             freight_cost = float(val)
+            freight_note = f"Auto: {label}"
             right.caption(f"Freight: {label} → £{freight_cost:,.2f}/t")
     except Exception as e:
         right.warning(f"Freight failed: {e} → manual")
         freight_cost = right.number_input("FREIGHT manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+        freight_note = "Manual (error)"
 
 computed["FREIGHT"] = float(freight_cost)
 
