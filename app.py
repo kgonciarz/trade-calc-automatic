@@ -223,15 +223,16 @@ def load_freight_table(path: str) -> pd.DataFrame:
     df["POL"] = df["POL"].map(_norm)
     df["POD"] = df["POD"].map(_norm)
     df["CONTAINER"] = df["CONTAINER"].apply(_norm_container)
+    
+    # Keep original shipping line for display, create normalized version for matching
     df["SHIPPING LINE"] = df["SHIPPING LINE"].astype(str).str.strip()
-    df["SHIPPING LINE"] = df["SHIPPING LINE"].map(_norm)  # keep for logic
+    df["SHIPPING_LINE_NORM"] = df["SHIPPING LINE"].map(_norm)  # normalized for logic
 
     # keep Shipping Line S for display/debug only
     if "SHIPPING LINE S" in df.columns:
         df["SHIPPING LINE S"] = df["SHIPPING LINE S"].astype(str).str.strip()
     else:
         df["SHIPPING LINE S"] = ""
-
 
     df["CURRENCY"] = df["CURRENCY"].astype(str).str.strip().str.upper()
 
