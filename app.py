@@ -1,3 +1,4 @@
+# app.py — Incoterm Auto Calculator (single "Price") + ICE London LIVE
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -25,7 +26,6 @@ FREIGHT_XLSX = "logistics_freight_trade_calc.xlsx"
 WAREHOUSE_XLSX = "warehouse_costs.xlsx"
 
 RENT_ALIASES = {"WAREHOUSE RENT", "RENT", "STORAGE RENT"}
-
 COCOA_DELIVERY_MONTHS = [("Mar", "H"), ("May", "K"), ("Jul", "N"), ("Sep", "U"), ("Dec", "Z")]
 
 ICE_XTICK_URL = os.getenv("ICE_XTICK_URL", "")
@@ -36,7 +36,7 @@ def _ice_ok() -> bool:
     return bool(ICE_XTICK_URL and ICE_USERNAME and ICE_PASSWORD)
 
 # =========================
-# YOUR DROPDOWNS (paste your full lists here)
+# YOUR DROPDOWNS (same style as your original)
 # =========================
 pol_options = [
     "POL", "ABIDJAN", "TIN CAN", "APAPA", "CALLAO", "CONAKRY", "DIEGO SUAREZ", "DOUALA",
@@ -102,6 +102,7 @@ def fetch_ice_last_close(symbol: str) -> float | None:
         timeout=20,
     )
     r.raise_for_status()
+
     xml_text = (r.text or "").strip()
     if not xml_text:
         return None
@@ -146,10 +147,10 @@ def load_cost_tables():
 def included_keys(mat_df: pd.DataFrame, incoterm: str) -> list[str]:
     ic = incoterm.strip().upper()
     keys = mat_df.loc[mat_df[ic] == 1, "KEY"].tolist()
-    return list(dict.fromkeys(keys))  # unique keep order
+    return list(dict.fromkeys(keys))
 
 # =========================
-# FREIGHT TABLE
+# FREIGHT
 # =========================
 @st.cache_data(show_spinner=False)
 def load_freight_table(path: str) -> pd.DataFrame:
@@ -169,7 +170,6 @@ def load_freight_table(path: str) -> pd.DataFrame:
     df["ALL_IN"] = pd.to_numeric(df["ALL_IN"], errors="coerce")
     df = df.dropna(subset=["POL", "POD", "CONTAINER", "SHIPPING LINE", "ALL_IN", "CURRENCY"]).copy()
 
-    # optional validity filter
     if "VALID" in df.columns:
         df["VALID_DT"] = pd.to_datetime(df["VALID"], errors="coerce", dayfirst=True)
         today = pd.Timestamp(datetime.now().date())
@@ -177,13 +177,7 @@ def load_freight_table(path: str) -> pd.DataFrame:
 
     return df
 
-def freight_gbp_per_ton(
-    df: pd.DataFrame,
-    pol: str,
-    pod: str,
-    container: str,
-    carrier_choice: str,
-) -> tuple[float | None, str]:
+def freight_gbp_per_ton(df: pd.DataFrame, pol: str, pod: str, container: str, carrier_choice: str) -> tuple[float | None, str]:
     pol_n = _norm(pol)
     pod_n = _norm(pod)
     cont = str(container).strip()
@@ -227,7 +221,7 @@ def freight_gbp_per_ton(
     return round(per_container / tons_per_container, 2), label
 
 # =========================
-# WAREHOUSE TABLE
+# WAREHOUSE
 # =========================
 @st.cache_data(show_spinner=False)
 def load_warehouse_table(path: str) -> pd.DataFrame:
@@ -238,22 +232,20 @@ def load_warehouse_table(path: str) -> pd.DataFrame:
 
 def warehouse_series(wh_df: pd.DataFrame, wh_name: str, rent_months: int) -> pd.Series:
     if wh_name not in wh_df.columns:
-        raise ValueError(f"Warehouse '{wh_name}' not found in {WAREHOUSE_XLSX}")
-
+        raise ValueError(f"Warehouse '{wh_name}' not found")
     s = pd.to_numeric(wh_df[wh_name], errors="coerce").fillna(0.0).astype(float)
     s.index = s.index.map(_norm)
-
     rent_key = next((k for k in RENT_ALIASES if k in s.index), None)
     if rent_key:
         s.loc[rent_key] = float(s.loc[rent_key]) * int(rent_months)
     return s
 
 # =========================
-# AUTO COST ENGINE
+# COST ENGINE (Price-based)
 # =========================
 def calc_cost_breakdown(
     inc_keys: list[str],
-    base_buy_gbp: float,
+    price_gbp: float,
     cost_df: pd.DataFrame,
     computed: dict[str, float],
 ):
@@ -284,12 +276,12 @@ def calc_cost_breakdown(
 
         val = float(val)
         if typ == "percent":
-            amt = (val / 100.0) * base_buy_gbp
-            rows.append({"Cost Item": name, "GBP/ton": round(amt, 2), "Source": f"{val:.4f}% of buy"})
+            # percent is applied to PRICE now (your requested model)
+            amt = (val / 100.0) * price_gbp
+            rows.append({"Cost Item": name, "GBP/ton": round(amt, 2), "Source": f"{val:.4f}% of price"})
         else:
             rows.append({"Cost Item": name, "GBP/ton": round(val, 2), "Source": "Fixed (cost_items.xlsx)"})
 
-    # add computed items if included
     for name, v in computed.items():
         if _norm(name) in inc_keys:
             rows.append({"Cost Item": name, "GBP/ton": round(float(v or 0.0), 2), "Source": "Computed"})
@@ -299,23 +291,22 @@ def calc_cost_breakdown(
     return df, subtotal, missing_manual
 
 # =========================
-# UI
+# APP UI
 # =========================
 st.set_page_config(layout="wide")
-st.title("🧮 Cocoa Trade Assistant — Incoterm Auto Calculator (ICE live)")
+st.title("🧮 Incoterm Auto Calculator — Result = Price − Costs + Diff (ICE live)")
 
 left, right = st.columns([0.60, 0.40], gap="large")
 
 with left:
-    st.subheader("Trade Parameters")
-
+    st.subheader("Inputs")
     incoterm = st.selectbox("Incoterm", INCOTERMS, index=2)
     volume = st.number_input("Volume (tons)", min_value=1, value=1, step=1)
 
-    st.markdown("### ICE London contract")
-    use_ice = st.toggle("Use ICE London futures (LIVE from ICE xtick)", value=False, disabled=not _ice_ok())
+    st.markdown("### ICE London contract (optional)")
+    use_ice = st.toggle("Use ICE London futures (LIVE)", value=False, disabled=not _ice_ok())
     if not _ice_ok():
-        st.caption("ICE xtick not configured. Set ICE_XTICK_URL / ICE_USERNAME / ICE_PASSWORD.")
+        st.caption("ICE not configured. Set ICE_XTICK_URL / ICE_USERNAME / ICE_PASSWORD.")
 
     ice_month_name = st.selectbox("Delivery month", [n for n, _ in COCOA_DELIVERY_MONTHS], index=0)
     ice_year_full = st.number_input("Delivery year (YYYY)", min_value=2024, max_value=2035, value=datetime.now().year, step=1)
@@ -324,10 +315,10 @@ with left:
     ice_symbol = f"C {yy:02d}{ice_month_code}-ICE"
     st.caption(f"Selected: {ice_symbol}")
 
-    st.markdown("### Buy price")
-    buy_ccy = st.selectbox("Buy currency", ["GBP", "EUR", "USD"], index=0, disabled=use_ice)
-    buy_price_input = st.number_input(
-        f"Buy price ({'GBP' if use_ice else buy_ccy}/t)",
+    st.markdown("### Price (single number)")
+    price_ccy = st.selectbox("Price currency", ["GBP", "EUR", "USD"], index=0, disabled=use_ice)
+    price_input = st.number_input(
+        f"Price ({'GBP' if use_ice else price_ccy}/t)",
         min_value=0.0,
         value=7500.0,
         step=10.0,
@@ -335,22 +326,18 @@ with left:
         disabled=use_ice,
     )
 
-    st.markdown("### Selling price")
-    sell_ccy = st.selectbox("Sell currency", ["GBP", "EUR", "USD"], index=0)
-    sell_price_input = st.number_input(f"Sell price ({sell_ccy}/t)", min_value=0.0, value=8500.0, step=10.0, format="%.2f")
-
-    st.markdown("### Buying Diff (manual, adds to margin/revenue)")
-    buying_diff = st.number_input("Buying Diff (GBP/ton)", value=0.0, step=1.0, format="%.2f")
+    st.markdown("### Diff (adds to result)")
+    diff = st.number_input("Diff (GBP/ton)", value=0.0, step=1.0, format="%.2f")
 
     st.markdown("---")
     st.subheader("Route / Logistics")
-    port = st.selectbox("Port of Loading (POL)", sorted(pol_options))
-    destination = st.selectbox("Destination (POD)", sorted(destination_options))
-    container_size = st.selectbox("Container size", ["20", "40"], index=1)
+    pol = st.selectbox("POL", sorted(pol_options))
+    pod = st.selectbox("POD", sorted(destination_options))
+    container_size = st.selectbox("Container", ["20", "40"], index=1)
 
     st.markdown("---")
     st.subheader("Warehouse")
-    rent_months = st.number_input("Warehouse rent months", min_value=0, value=1, step=1)
+    rent_months = st.number_input("Rent months (multiplies WAREHOUSE RENT)", min_value=0, value=1, step=1)
 
     st.markdown("---")
     st.subheader("Financing")
@@ -364,178 +351,144 @@ with right:
     st.caption(f"Time: {datetime.now(ZoneInfo('Europe/Zurich')).strftime('%Y-%m-%d %H:%M:%S')}")
 
 # =========================
-# BUY PRICE (ICE override)
+# PRICE (ICE override)
 # =========================
 ice_used = False
 if use_ice:
     try:
         last = fetch_ice_last_close(ice_symbol)
         if last is None:
-            st.warning(f"No ICE value for {ice_symbol}; using manual buy price.")
-            base_buy = to_gbp(buy_price_input, buy_ccy)
+            right.warning(f"No ICE value for {ice_symbol}; using manual Price.")
+            price_gbp = to_gbp(price_input, price_ccy)
         else:
             ice_used = True
-            base_buy = float(last)  # GBP/t
-            with right:
-                st.success(f"{ice_symbol}: £{base_buy:,.2f}/t (ICE live)")
+            price_gbp = float(last)
+            right.success(f"{ice_symbol}: £{price_gbp:,.2f}/t (ICE live)")
     except Exception as e:
-        st.error(f"ICE fetch failed: {e}. Using manual buy price.")
-        base_buy = to_gbp(buy_price_input, buy_ccy)
+        right.error(f"ICE fetch failed: {e}. Using manual Price.")
+        price_gbp = to_gbp(price_input, price_ccy)
 else:
-    base_buy = to_gbp(buy_price_input, buy_ccy)
-
-sell_price = to_gbp(sell_price_input, sell_ccy)
+    price_gbp = to_gbp(price_input, price_ccy)
 
 # =========================
-# LOAD TABLES
+# Load matrix + cost items
 # =========================
 cost_df, mat_df = load_cost_tables()
-keys_inc = included_keys(mat_df, incoterm)
+inc_keys = included_keys(mat_df, incoterm)
+
+# Diff applies only if matrix has BUYING DIFF GBP = 1
+diff_applies = (_norm("BUYING DIFF GBP") in inc_keys)
+diff_used = diff if diff_applies else 0.0
 
 # =========================
-# FREIGHT AUTO (only if included)
-# =========================
-freight_cost = 0.0
-freight_note = "Not included"
-if _norm("FREIGHT") in keys_inc:
-    try:
-        freight_df = load_freight_table(FREIGHT_XLSX)
-
-        lane = freight_df[
-            (freight_df["POL"] == _norm(port)) &
-            (freight_df["POD"] == _norm(destination)) &
-            (freight_df["CONTAINER"] == str(container_size))
-        ]
-        carriers = sorted(lane["SHIPPING LINE"].unique().tolist()) if not lane.empty else []
-        carrier_choice = right.selectbox(
-            "Shipping line",
-            ["Auto (priciest)", "Auto (cheapest)"] + carriers,
-            index=0,
-        )
-
-        val, label = freight_gbp_per_ton(freight_df, port, destination, container_size, carrier_choice)
-        if val is None:
-            right.warning("No freight match for this lane → enter manually.")
-            freight_cost = right.number_input("FREIGHT manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
-            freight_note = "Manual (no lane match)"
-        else:
-            freight_cost = float(val)
-            freight_note = f"Auto ({label})"
-        right.caption(f"{freight_note} → £{freight_cost:,.2f}/t")
-
-    except Exception as e:
-        right.warning(f"Freight auto failed: {e} → enter manually.")
-        freight_cost = right.number_input("FREIGHT manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
-        freight_note = "Manual (error)"
-
-# =========================
-# WAREHOUSE AUTO (line items)
-# (You should add those warehouse row names to incoterm_matrix if you want incoterm control.)
+# Freight (computed)
 # =========================
 computed = {}
-computed["FREIGHT"] = freight_cost
+freight_cost = 0.0
 
+if _norm("FREIGHT") in inc_keys:
+    try:
+        fdf = load_freight_table(FREIGHT_XLSX)
+        lane = fdf[(fdf["POL"] == _norm(pol)) & (fdf["POD"] == _norm(pod)) & (fdf["CONTAINER"] == str(container_size))]
+        carriers = sorted(lane["SHIPPING LINE"].unique().tolist()) if not lane.empty else []
+        carrier_choice = right.selectbox("Shipping line", ["Auto (priciest)", "Auto (cheapest)"] + carriers, index=0)
+
+        val, label = freight_gbp_per_ton(fdf, pol, pod, container_size, carrier_choice)
+        if val is None:
+            right.warning("No freight match → manual input")
+            freight_cost = right.number_input("FREIGHT manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+        else:
+            freight_cost = float(val)
+            right.caption(f"Freight: {label} → £{freight_cost:,.2f}/t")
+    except Exception as e:
+        right.warning(f"Freight failed: {e} → manual")
+        freight_cost = right.number_input("FREIGHT manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+
+computed["FREIGHT"] = float(freight_cost)
+
+# =========================
+# Warehouse (inject line items)
+# =========================
 warehouse_total = 0.0
 try:
     wh_df = load_warehouse_table(WAREHOUSE_XLSX)
     wh_name = left.selectbox("Warehouse name", sorted(wh_df.columns), index=0)
-    wh_s = warehouse_series(wh_df, wh_name, rent_months)
-    warehouse_total = float(wh_s.sum())
-
+    ws = warehouse_series(wh_df, wh_name, rent_months)
+    warehouse_total = float(ws.sum())
     with right.expander("📦 Warehouse breakdown", expanded=False):
-        right.write(f"Warehouse: **{wh_name}**")
-        right.dataframe(wh_s.round(2).to_frame("GBP/ton"), use_container_width=True)
-        right.write(f"Total (all lines): **£{warehouse_total:,.2f}/t**")
+        right.dataframe(ws.round(2).to_frame("GBP/ton"), use_container_width=True)
+        right.write(f"Total: £{warehouse_total:,.2f}/t")
 
-    # inject each line item as computed so matrix can include them if present
-    for k, v in wh_s.items():
+    for k, v in ws.items():
         computed[k] = float(v)
-
 except Exception as e:
-    right.warning(f"Warehouse file not loaded ({e}). Using manual warehouse total.")
-    warehouse_total = right.number_input("Warehouse total manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
-    computed["WAREHOUSE TOTAL"] = float(warehouse_total)
+    right.warning(f"Warehouse not loaded: {e}")
+    wh_manual = right.number_input("Warehouse total manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+    computed["WAREHOUSE TOTAL"] = float(wh_manual)
 
 # =========================
-# AUTO COSTS + MANUAL for missing items
+# Auto costs + manual missing
 # =========================
-auto_df, auto_subtotal, missing_manual = calc_cost_breakdown(
-    inc_keys=keys_inc,
-    base_buy_gbp=base_buy,
+cost_breakdown_df, costs_subtotal, missing_manual = calc_cost_breakdown(
+    inc_keys=inc_keys,
+    price_gbp=price_gbp,
     cost_df=cost_df,
     computed=computed,
 )
 
-manual_missing_costs = {}
+manual_missing = {}
 if missing_manual:
-    right.markdown("### Manual inputs (only what cannot be automated)")
+    right.markdown("### Manual inputs (only what can't be automated)")
     for item in missing_manual:
-        label = str(item)
-        manual_missing_costs[label] = right.number_input(
-            f"{label} (GBP/ton)",
+        manual_missing[str(item)] = right.number_input(
+            f"{item} (GBP/ton)",
             min_value=0.0,
             value=0.0,
             step=1.0,
             format="%.2f",
-            key=f"man_{_norm(label)}",
+            key=f"man_{_norm(item)}",
         )
 
-if manual_missing_costs:
-    add = pd.DataFrame([{"Cost Item": k, "GBP/ton": float(v), "Source": "Manual"} for k, v in manual_missing_costs.items()])
-    auto_df = pd.concat([auto_df, add], ignore_index=True) if not auto_df.empty else add
-    auto_subtotal = float(auto_df["GBP/ton"].sum()) if not auto_df.empty else 0.0
+if manual_missing:
+    add = pd.DataFrame([{"Cost Item": k, "GBP/ton": float(v), "Source": "Manual"} for k, v in manual_missing.items()])
+    cost_breakdown_df = pd.concat([cost_breakdown_df, add], ignore_index=True) if not cost_breakdown_df.empty else add
+    costs_subtotal = float(cost_breakdown_df["GBP/ton"].sum()) if not cost_breakdown_df.empty else 0.0
 
 # =========================
-# FINANCE (only if included)
+# Finance (optional)
 # =========================
-finance_included = (_norm("FINANCE") in keys_inc)
-
-pre_finance_cost = base_buy + auto_subtotal  # IMPORTANT: buying diff is NOT in cost
+finance_included = (_norm("FINANCE") in inc_keys)
+pre_finance_cost = costs_subtotal
 if finance_included and payment_days > 0 and annual_rate > 0:
-    financing = (annual_rate / 365.0) * float(payment_days) * pre_finance_cost
+    finance_cost = (annual_rate / 365.0) * float(payment_days) * pre_finance_cost
 else:
-    financing = 0.0
+    finance_cost = 0.0
 
-landed_cost = pre_finance_cost + financing
+total_cost = costs_subtotal + finance_cost
 
 # =========================
-# BUYING DIFF APPLIES TO REVENUE / MARGIN
-# controlled by matrix row BUYING DIFF GBP
+# RESULT = Price - Costs + Diff
 # =========================
-diff_applies = (_norm("BUYING DIFF GBP") in keys_inc)
-effective_sell = sell_price + (buying_diff if diff_applies else 0.0)
-
-margin_per_ton = effective_sell - landed_cost
-total_margin = margin_per_ton * float(volume)
-margin_pct = (margin_per_ton / effective_sell * 100.0) if effective_sell > 0 else 0.0
+result_per_ton = price_gbp - total_cost + diff_used
+total_result = result_per_ton * float(volume)
 
 # =========================
 # OUTPUT
 # =========================
 right.markdown("## Results")
-if ice_used:
-    right.success(f"Buy (ICE live): £{base_buy:,.2f}/t — {ice_symbol}")
-else:
-    right.info(f"Buy (normalized): £{base_buy:,.2f}/t")
+right.info(f"Price (GBP): **£{price_gbp:,.2f}/t**" + (f"  (ICE: {ice_symbol})" if ice_used else ""))
+right.info(f"Total costs: **£{total_cost:,.2f}/t**")
+right.caption(f"Diff applies by matrix? {'YES' if diff_applies else 'NO'} → using £{diff_used:,.2f}/t")
 
-right.success(f"Sell (normalized): £{sell_price:,.2f}/t")
-right.caption(f"Buying diff applies by matrix? {'YES' if diff_applies else 'NO'}")
-right.info(f"Effective sell (sell + diff if applies): **£{effective_sell:,.2f}/t**")
-
-right.write(f"Auto costs subtotal: **£{auto_subtotal:,.2f}/t**")
-right.write(f"Finance included by matrix? **{'YES' if finance_included else 'NO'}** → £{financing:,.2f}/t")
-right.success(f"Total landed cost: **£{landed_cost:,.2f}/t**")
-
-right.success(f"Margin per ton: **£{margin_per_ton:,.2f}/t**")
-right.success(f"Total margin: **£{total_margin:,.2f}**")
-right.caption(f"Margin %: {margin_pct:.2f}%")
+right.success(f"Result per ton = Price − Costs + Diff: **£{result_per_ton:,.2f}/t**")
+right.success(f"Total result (× {int(volume)} t): **£{total_result:,.2f}**")
 
 with st.expander("📊 Cost breakdown (incoterm included)", expanded=True):
     st.write(f"Incoterm: **{incoterm}**")
-    if auto_df.empty:
+    if cost_breakdown_df.empty:
         st.info("No costs included (or matrix/cost names do not match).")
     else:
-        st.dataframe(auto_df.sort_values("GBP/ton", ascending=False), use_container_width=True)
+        st.dataframe(cost_breakdown_df.sort_values("GBP/ton", ascending=False), use_container_width=True)
 
 with st.expander("🔎 Included items (matrix keys)", expanded=False):
-    st.write(keys_inc)
+    st.write(inc_keys)
