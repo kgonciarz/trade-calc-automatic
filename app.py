@@ -155,27 +155,39 @@ def included_keys(mat_df: pd.DataFrame, incoterm: str) -> list[str]:
 @st.cache_data(show_spinner=False)
 def load_freight_table(path: str) -> pd.DataFrame:
     df = pd.read_excel(path)
-    df.columns = [str(c).strip().upper() for c in df.columns]
+
+    # normalize column names aggressively (strip + collapse spaces + upper)
+    def norm_col(c):
+        return re.sub(r"\s+", " ", str(c or "")).strip().upper()
+
+    df.columns = [norm_col(c) for c in df.columns]
+
+    # map possible variants to canonical names
+    rename = {}
+    if "SHIPPING LINE" not in df.columns:
+        # sometimes it's "SHIPPING LINE S" or similar; prefer the main one if exists
+        if "SHIPPING LINE S" in df.columns:
+            rename["SHIPPING LINE S"] = "SHIPPING LINE"
+    df = df.rename(columns=rename)
 
     needed = {"POL", "POD", "CONTAINER", "SHIPPING LINE", "ALL_IN", "CURRENCY"}
     missing = needed - set(df.columns)
     if missing:
         raise ValueError(f"Freight file missing columns: {missing}")
 
-    df["POL"] = df["POL"].map(_norm)
+    # normalize values
+    df["POL"] = df["POL"].map(_norm)          # -> upper trimmed
     df["POD"] = df["POD"].map(_norm)
     df["CONTAINER"] = df["CONTAINER"].astype(str).str.strip()
     df["SHIPPING LINE"] = df["SHIPPING LINE"].map(_norm)
     df["CURRENCY"] = df["CURRENCY"].astype(str).str.strip().str.upper()
+
+    # numeric all_in (your ALL_IN looks numeric already)
     df["ALL_IN"] = pd.to_numeric(df["ALL_IN"], errors="coerce")
+
     df = df.dropna(subset=["POL", "POD", "CONTAINER", "SHIPPING LINE", "ALL_IN", "CURRENCY"]).copy()
-
-    if "VALID" in df.columns:
-        df["VALID_DT"] = pd.to_datetime(df["VALID"], errors="coerce", dayfirst=True)
-        today = pd.Timestamp(datetime.now().date())
-        df = df[(df["VALID_DT"].isna()) | (df["VALID_DT"] >= today)].copy()
-
     return df
+
 
 def freight_gbp_per_ton(df: pd.DataFrame, pol: str, pod: str, container: str, carrier_choice: str) -> tuple[float | None, str]:
     pol_n = _norm(pol)
