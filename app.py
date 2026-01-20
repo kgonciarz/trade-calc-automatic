@@ -718,7 +718,7 @@ if use_transport:
         else:
             # ✅ Service provider dropdown (all providers available on this route)
             providers = sorted(route_df["SERVICE PROVIDER"].unique().tolist())
-            provider = right.selectbox("Service Provider", providers, index=0)
+            provider = left.selectbox("Service Provider", providers, index=0)
 
             # If multiple rows exist for same provider, pick the cheapest rate for that provider
             prov_df = route_df[route_df["SERVICE PROVIDER"] == provider].copy()
