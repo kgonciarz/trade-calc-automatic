@@ -857,12 +857,20 @@ if missing_manual_names or diff_item_name:
             key=f"man_{_norm(item)}",
         )
 
-# =========================
-# One unified table + applied total
-# =========================
-# Force numeric type and recompute subtotal from what the user sees
-cost_table["Applied GBP/t"] = pd.to_numeric(cost_table["Applied GBP/t"], errors="coerce").fillna(0.0)
+cost_table, costs_subtotal_applied = build_unified_cost_table(
+    inc_keys=inc_keys,
+    price_gbp=price_gbp,
+    cost_df=cost_df,
+    computed=computed,
+    manual_missing=manual_missing_vals,
+)
+# 🔒 Force totals to match what the table shows
+cost_table["Applied GBP/t"] = (
+    pd.to_numeric(cost_table["Applied GBP/t"], errors="coerce")
+    .fillna(0.0)
+)
 costs_subtotal_applied = float(cost_table["Applied GBP/t"].sum())
+
 
 
 # Finance
