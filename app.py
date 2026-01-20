@@ -567,14 +567,35 @@ with left:
         ].copy()
 
         
+# lane_filtered already equals: fdf_c filtered by POL+POD (and fdf_c already filtered by container)
+
         shipping_line_options = sorted(lane_filtered["SHIPPING_LINE_CLEAN"].dropna().unique().tolist())
 
-        # Put STS first, but don't hide the rest
-        sts = [x for x in shipping_line_options if x.startswith("STS_")]
-        non = [x for x in shipping_line_options if not x.startswith("STS_")]
-        final_options = sts + non
+        # Compute GBP/t for each line and choose the priciest as default
+        line_prices = []
+        for line in shipping_line_options:
+            gbp_ton, _ = freight_gbp_per_ton(freight_df_for_ui, pol, pod, container_size, line)
+            if gbp_ton is not None:
+                line_prices.append((line, float(gbp_ton)))
 
-        shipping_line = st.selectbox("Shipping line", final_options, index=0)
+        if not line_prices:
+            st.warning("No freight price available for any shipping line on this lane.")
+            shipping_line = st.text_input("Shipping line (manual)", value="")
+        else:
+            # priciest first
+            line_prices.sort(key=lambda x: x[1], reverse=True)
+
+            # default index = 0 (priciest)
+            shipping_lines_sorted = [lp[0] for lp in line_prices]
+
+            shipping_line = st.selectbox(
+                "Shipping line (default = priciest)",
+                shipping_lines_sorted,
+                index=0,
+                key="shipping_line",
+            )
+            st.caption(f"Default picked priciest: {shipping_line} — £{line_prices[0][1]:,.2f}/t")
+
 
 
     st.markdown("---")
