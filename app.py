@@ -807,31 +807,6 @@ if use_transport:
 
 
 # =========================
-# Manual inputs for missing INCLUDED items
-# =========================
-manual_missing_vals: dict[str, float] = {}
-cost_map = {r["KEY"]: r for _, r in cost_df.iterrows()}
-computed_keys = {_norm(k) for k in computed.keys()}
-
-missing_manual_names: list[str] = []
-diff = 0.0  # Initialize diff variable
-diff_item_name = None  # Track the diff item name
-for k in inc_keys:
-    if k in computed_keys:
-        continue
-    # Skip FINANCE - it's calculated separately
-    if k in (_norm("FINANCE"),):
-        continue
-    # Handle BUYING DIFF GBP / BASED DIFF specially - show as manual input but DON'T add to costs
-    if k in (_norm("BUYING DIFF GBP"), _norm("BASED DIFF")):
-        r = cost_map.get(k)
-        diff_item_name = str(r.get("COST ITEM", k)).strip() if r is not None else k
-        continue
-    r = cost_map.get(k)
-    if r is None or pd.isna(r.get("VALUE", np.nan)):
-        missing_manual_names.append(str(r.get("COST ITEM", k)).strip() if r is not None else k)
-
-# =========================
 # Manual inputs for missing INCLUDED items + DIFF
 # =========================
 manual_missing_vals: dict[str, float] = {}
@@ -885,13 +860,10 @@ if missing_manual_names or diff_item_name:
 # =========================
 # One unified table + applied total
 # =========================
-cost_table, costs_subtotal_applied = build_unified_cost_table(
-    inc_keys=inc_keys,
-    price_gbp=price_gbp,
-    cost_df=cost_df,
-    computed=computed,
-    manual_missing=manual_missing_vals,
-)
+# Force numeric type and recompute subtotal from what the user sees
+cost_table["Applied GBP/t"] = pd.to_numeric(cost_table["Applied GBP/t"], errors="coerce").fillna(0.0)
+costs_subtotal_applied = float(cost_table["Applied GBP/t"].sum())
+
 
 # Finance
 finance_included = (_norm("FINANCE") in inc_keys)
