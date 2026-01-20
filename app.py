@@ -41,6 +41,8 @@ FREIGHT_XLSX = "logistics_freight_trade_calc.xlsx"
 WAREHOUSE_XLSX = "warehouse_costs.xlsx"
 TRANSPORT_XLSX = "Transport.xlsx"
 DEFAULT_TRUCK_TONS = 25.0
+DRESSING_XLSX = "Dressing.xlsx"
+
 
 RENT_ALIASES = {"WAREHOUSE RENT", "RENT", "STORAGE RENT"}
 COCOA_DELIVERY_MONTHS = [("Mar", "H"), ("May", "K"), ("Jul", "N"), ("Sep", "U"), ("Dec", "Z")]
@@ -220,6 +222,22 @@ def load_transport_table(path: str) -> pd.DataFrame:
     df = df.dropna(subset=["POL", "POD", "SERVICE PROVIDER", "RATE"]).copy()
     return df
 
+@st.cache_data(show_spinner=False)
+def load_dressing_table(path: str) -> pd.DataFrame:
+    df = pd.read_excel(path)
+    df.columns = [_norm_col(c) for c in df.columns]
+
+    needed = {"DRESSING", "VALUE", "CURRENCY"}
+    missing = needed - set(df.columns)
+    if missing:
+        raise ValueError(f"Dressing file missing columns: {missing}")
+
+    df["DRESSING"] = df["DRESSING"].astype(str).str.strip()
+    df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
+    df["CURRENCY"] = df["CURRENCY"].astype(str).str.strip().str.upper()
+
+    df = df.dropna(subset=["DRESSING", "VALUE"]).copy()
+    return df
 
 
 def transport_gbp_per_ton(
@@ -686,6 +704,40 @@ if marine_needed:
             computed["MARINE INSURANCE (2nd)"] = float(
                 right.number_input("MARINE INSURANCE (2nd) manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
             )
+# =========================
+# DRESSING (only if included by incoterm)
+# =========================
+if _norm("DRESSING") in inc_keys:
+    try:
+        ddf = load_dressing_table(DRESSING_XLSX)
+        options = ddf["DRESSING"].tolist()
+
+        # put selector on LEFT (like you prefer the flow)
+        chosen_dressing = left.selectbox("Dressing (from table)", options, index=0, key="dressing_choice")
+
+        row = ddf.loc[ddf["DRESSING"] == chosen_dressing].iloc[0]
+        raw_val = float(row["VALUE"])
+        raw_ccy = str(row["CURRENCY"]).upper()
+
+        # convert to GBP
+        if raw_ccy == "EUR":
+            dressing_gbp = raw_val * eur_gbp_rate
+        elif raw_ccy == "USD":
+            dressing_gbp = raw_val * usd_gbp_rate
+        else:
+            dressing_gbp = raw_val
+
+        computed["DRESSING"] = float(dressing_gbp)
+
+        right.caption(
+            f"Dressing: {chosen_dressing} = {raw_ccy} {raw_val:,.2f}/t → £{dressing_gbp:,.2f}/t"
+        )
+
+    except Exception as e:
+        right.warning(f"Dressing table error: {e} → manual input")
+        computed["DRESSING"] = float(
+            left.number_input("DRESSING manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f", key="dressing_manual")
+        )
 
 # =========================
 # TRANSPORT (inland) — tick + POL/POD + Service Provider dropdown
