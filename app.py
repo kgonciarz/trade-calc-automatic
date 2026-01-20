@@ -566,19 +566,16 @@ with left:
             (fdf_c["POD_CLEAN"] == pod)
         ].copy()
 
-        shipping_line_options = sorted(lane_filtered["SHIPPING_LINE_CLEAN"].unique().tolist())
         
-        # Check if any STS_ options exist
-        sts_options = [x for x in shipping_line_options if x.startswith("STS_")]
-        final_options = sts_options if sts_options else shipping_line_options
+        shipping_line_options = sorted(lane_filtered["SHIPPING_LINE_CLEAN"].dropna().unique().tolist())
 
-        if final_options:
-            shipping_line = st.selectbox("Shipping line", final_options, index=0)
-        else:
-            st.warning("No shipping lines found for this route")
-            shipping_line = st.text_input("Shipping line (manual)", value="")
+        # Put STS first, but don't hide the rest
+        sts = [x for x in shipping_line_options if x.startswith("STS_")]
+        non = [x for x in shipping_line_options if not x.startswith("STS_")]
+        final_options = sts + non
 
-        st.caption(f"Available shipping lines on this route: {len(final_options)}")
+        shipping_line = st.selectbox("Shipping line", final_options, index=0)
+
 
     st.markdown("---")
     st.subheader("Warehouse")
