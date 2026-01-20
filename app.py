@@ -205,8 +205,8 @@ def included_keys(mat_df: pd.DataFrame, incoterm: str) -> list[str]:
 @st.cache_data(show_spinner=False)
 def load_transport_table(path: str) -> pd.DataFrame:
     df = pd.read_excel(path)
-
     df.columns = [_norm_col(c) for c in df.columns]
+
     needed = {"POL", "POD", "SERVICE PROVIDER", "RATE"}
     missing = needed - set(df.columns)
     if missing:
@@ -215,9 +215,7 @@ def load_transport_table(path: str) -> pd.DataFrame:
     df["POL"] = df["POL"].map(_norm)
     df["POD"] = df["POD"].map(_norm)
     df["SERVICE PROVIDER"] = df["SERVICE PROVIDER"].astype(str).str.strip()
-
-    # RATE may be "2,400.00" -> use your money parser
-    df["RATE"] = df["RATE"].apply(_money_to_float)
+    df["RATE"] = df["RATE"].apply(_money_to_float)  # handles "2,400.00"
 
     df = df.dropna(subset=["POL", "POD", "SERVICE PROVIDER", "RATE"]).copy()
     return df
