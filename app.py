@@ -40,7 +40,7 @@ INCOTERM_MATRIX_XLSX = "incoterm_matrix.xlsx"
 FREIGHT_XLSX = "logistics_freight_trade_calc.xlsx"
 WAREHOUSE_XLSX = "warehouse_costs.xlsx"
 TRANSPORT_XLSX = "Transport.xlsx"
-DEFAULT_TRUCK_TONS = 24.0
+DEFAULT_TRUCK_TONS = 25.0
 
 RENT_ALIASES = {"WAREHOUSE RENT", "RENT", "STORAGE RENT"}
 COCOA_DELIVERY_MONTHS = [("Mar", "H"), ("May", "K"), ("Jul", "N"), ("Sep", "U"), ("Dec", "Z")]
@@ -513,7 +513,7 @@ with left:
     price_input = st.number_input(
         f"Price ({'GBP' if use_ice else price_ccy}/t)",
         min_value=0.0,
-        value=7500.0,
+        value=4000.0,
         step=10.0,
         format="%.2f",
         disabled=use_ice,
@@ -690,7 +690,7 @@ if marine_needed:
             )
 
 # =========================
-# TRANSPORT (inland) — tick + POL/POD/Provider cascade from Transport.xlsx
+# TRANSPORT (inland) — tick + POL/POD + Service Provider dropdown
 # =========================
 use_transport = left.checkbox("Add TRANSPORT (inland)?", value=False)
 
@@ -706,56 +706,55 @@ if use_transport:
         t_pod_list = sorted(tdf.loc[tdf["POL"] == _norm(t_pol), "POD"].unique().tolist())
         t_pod = left.selectbox("Transport POD", t_pod_list, index=0)
 
-        # Provider depends on POL+POD (show cheapest first)
+        # Route rows (may have multiple providers)
         route_df = tdf[(tdf["POL"] == _norm(t_pol)) & (tdf["POD"] == _norm(t_pod))].copy()
-        route_df = route_df.sort_values("RATE")
+        route_df = route_df.sort_values(["SERVICE PROVIDER", "RATE"])
 
-        provider_labels = [
-            f'{r["SERVICE PROVIDER"]} — €{float(r["RATE"]):,.2f}/truck'
-            for _, r in route_df.iterrows()
-        ]
+        if route_df.empty:
+            right.warning("No transport rates for this POL/POD → manual input")
+            transport_gbp_ton = right.number_input(
+                "TRANSPORT manual (GBP/ton)",
+                min_value=0.0, value=0.0, step=1.0, format="%.2f"
+            )
+            computed["TRANSPORT (inland)"] = float(transport_gbp_ton)
+        else:
+            # ✅ Service provider dropdown (all providers available on this route)
+            providers = sorted(route_df["SERVICE PROVIDER"].unique().tolist())
+            provider = right.selectbox("Service Provider", providers, index=0)
 
-        provider_idx = right.selectbox(
-            "Transport provider",
-            list(range(len(provider_labels))),
-            format_func=lambda i: provider_labels[i],
-            index=0,
-        )
+            # If multiple rows exist for same provider, pick the cheapest rate for that provider
+            prov_df = route_df[route_df["SERVICE PROVIDER"] == provider].copy()
+            chosen_row = prov_df.loc[prov_df["RATE"].idxmin()]
+            rate_eur_truck = float(chosen_row["RATE"])
 
-        chosen_row = route_df.iloc[int(provider_idx)]
-        rate_eur_truck = float(chosen_row["RATE"])
-        provider_name = str(chosen_row["SERVICE PROVIDER"]).strip()
+            tons_per_truck = left.number_input(
+                "Tons per truck (transport ÷)",
+                min_value=1.0,
+                value=float(DEFAULT_TRUCK_TONS),
+                step=1.0,
+                format="%.0f",
+            )
 
-        # Tons per truck (same logic as your old app)
-        tons_per_truck = left.number_input(
-            "Tons per truck (transport ÷)",
-            min_value=1.0,
-            value=float(DEFAULT_TRUCK_TONS),
-            step=1.0,
-            format="%.0f",
-        )
+            rate_gbp_truck = rate_eur_truck * eur_gbp_rate
+            transport_gbp_ton = round(rate_gbp_truck / float(tons_per_truck), 2)
 
-        rate_gbp_truck = rate_eur_truck * eur_gbp_rate
-        transport_gbp_ton = round(rate_gbp_truck / float(tons_per_truck), 2)
+            right.caption(
+                f"Transport {t_pol} → {t_pod} ({provider}): "
+                f"€{rate_eur_truck:,.2f}/truck → £{rate_gbp_truck:,.2f}/truck → "
+                f"£{transport_gbp_ton:,.2f}/t (÷{tons_per_truck:.0f})"
+            )
 
-        right.caption(
-            f"Transport {t_pol} → {t_pod} ({provider_name}): "
-            f"€{rate_eur_truck:,.2f}/truck → £{rate_gbp_truck:,.2f}/truck → "
-            f"£{transport_gbp_ton:,.2f}/t (÷{tons_per_truck:.0f})"
-        )
+            computed["TRANSPORT (inland)"] = float(transport_gbp_ton)
 
-        # Add to computed so it shows in unified table
-        computed["TRANSPORT (inland)"] = float(transport_gbp_ton)
-
-        # Optional debug table
-        with right.expander("🔎 Transport route rows (debug)", expanded=False):
-            right.dataframe(route_df[["POL","POD","SERVICE PROVIDER","RATE"]], use_container_width=True)
+            with right.expander("🔎 Transport route rows (debug)", expanded=False):
+                right.dataframe(route_df[["POL","POD","SERVICE PROVIDER","RATE"]], use_container_width=True)
 
     except Exception as e:
-        right.warning(f"Transport load/calc failed: {e} → manual input")
+        right.warning(f"Transport failed: {e} → manual input")
         computed["TRANSPORT (inland)"] = float(
             right.number_input("TRANSPORT manual (GBP/ton)", min_value=0.0, value=0.0, step=1.0, format="%.2f")
         )
+
 
 # =========================
 # Manual inputs for missing INCLUDED items
