@@ -7,3 +7,4 @@ yfinance
 datetime
 reportlab
 python-dotenv
+altair<5
