@@ -2,9 +2,9 @@ openpyxl
 openai
 python-dotenv
 pandas
-streamlit
 yfinance
 datetime
 reportlab
 python-dotenv
-altair<5
+streamlit>=1.28
+altair>=5
